@@ -1,0 +1,1 @@
+using System.ComponentModel;using System.Windows;using System.Windows.Media;namespace EyeContactCam;public partial class OutputWindow:Window{public bool AllowClose{get;set;}public OutputWindow(){InitializeComponent();}public void SetFrame(ImageSource frame)=>OutputImage.Source=frame;private void OnClosing(object? s,CancelEventArgs e){if(!AllowClose){e.Cancel=true;Hide();}}}
