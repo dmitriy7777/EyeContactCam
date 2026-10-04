@@ -20,6 +20,7 @@ public sealed class CameraPipeline : IDisposable
     private bool _profileLoaded;
 
     public int LastEyesFound { get; private set; }
+    public double LastCorrectionMagnitude { get; private set; }
     public bool HasCalibration => _profileLoaded;
     private static string ProfilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -58,6 +59,7 @@ public sealed class CameraPipeline : IDisposable
         Cv2.CvtColor(input, gray, ColorConversionCodes.BGR2GRAY);
         var faces = _face.DetectMultiScale(gray, 1.12, 5, HaarDetectionTypes.ScaleImage, new Size(150, 150));
         LastEyesFound = 0;
+        LastCorrectionMagnitude = 0;
         if (faces.Length == 0) return output;
 
         var face = faces.OrderByDescending(r => r.Width * r.Height).First();
@@ -85,7 +87,11 @@ public sealed class CameraPipeline : IDisposable
             _smoothX[i] = _smoothX[i] * .78 + nx * .22;
             _smoothY[i] = _smoothY[i] * .82 + ny * .18;
             if (_calibrating) _samples[i].Add((_smoothX[i], _smoothY[i]));
-            if (correct) WarpIris(output, _smoothEyes[i], _smoothX[i], _smoothY[i], _targetX[i], _targetY[i], strength);
+            if (correct)
+            {
+                var magnitude = WarpIris(output, _smoothEyes[i], _smoothX[i], _smoothY[i], _targetX[i], _targetY[i], strength);
+                LastCorrectionMagnitude = Math.Max(LastCorrectionMagnitude, magnitude);
+            }
             LastEyesFound++;
         }
         _hasSmoothEyes = LastEyesFound == 2;
@@ -116,18 +122,19 @@ public sealed class CameraPipeline : IDisposable
         return new Point2d(inner.X + wx / total, inner.Y + wy / total);
     }
 
-    private static void WarpIris(Mat frame, Rect eye, double px, double py, double tx, double ty, double strength)
+    private static double WarpIris(Mat frame, Rect eye, double px, double py, double tx, double ty, double strength)
     {
         var padX = (int)(eye.Width * .08); var padY = (int)(eye.Height * .08);
         var region = ClampRect(new Rect(eye.X - padX, eye.Y - padY, eye.Width + 2 * padX, eye.Height + 2 * padY), frame.Size());
         using var destination = new Mat(frame, region); using var source = destination.Clone();
         using var mapX = new Mat(region.Height, region.Width, MatType.CV_32FC1);
         using var mapY = new Mat(region.Height, region.Width, MatType.CV_32FC1);
-        var dx = Math.Clamp((tx - px) * eye.Width * strength, -eye.Width * .18, eye.Width * .18);
-        var dy = Math.Clamp((ty - py) * eye.Height * strength, -eye.Height * .10, eye.Height * .10);
+        // Strong mode: enough travel to make reading above/below the lens visibly redirect to the calibrated point.
+        var dx = Math.Clamp((tx - px) * eye.Width * strength * 1.65, -eye.Width * .30, eye.Width * .30);
+        var dy = Math.Clamp((ty - py) * eye.Height * strength * 1.55, -eye.Height * .24, eye.Height * .24);
         var centerX = eye.X - region.X + tx * eye.Width;
         var centerY = eye.Y - region.Y + ty * eye.Height;
-        var sigmaX = Math.Max(3, eye.Width * .19); var sigmaY = Math.Max(2, eye.Height * .24);
+        var sigmaX = Math.Max(3, eye.Width * .27); var sigmaY = Math.Max(2, eye.Height * .32);
         for (var y = 0; y < region.Height; y++)
         for (var x = 0; x < region.Width; x++)
         {
@@ -135,6 +142,7 @@ public sealed class CameraPipeline : IDisposable
             mapX.Set(y, x, (float)(x - dx * weight)); mapY.Set(y, x, (float)(y - dy * weight));
         }
         Cv2.Remap(source, destination, mapX, mapY, InterpolationFlags.Cubic, BorderTypes.Reflect101);
+        return Math.Sqrt(dx * dx + dy * dy);
     }
 
     private static Rect SmoothRect(Rect old, Rect current, double a) => new(
