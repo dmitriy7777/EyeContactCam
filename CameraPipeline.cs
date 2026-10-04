@@ -20,6 +20,8 @@ public sealed class CameraPipeline : IDisposable
     private bool _hasSmoothEyes;
     private bool _calibrating;
     private bool _profileLoaded;
+    private double _binocularDx;
+    private double _binocularDy;
 
     public int LastEyesFound { get; private set; }
     public double LastCorrectionMagnitude { get; private set; }
@@ -74,6 +76,7 @@ public sealed class CameraPipeline : IDisposable
         var all = shapes[0];
         var eyePoints = new[] { all.Skip(36).Take(6).ToArray(), all.Skip(42).Take(6).ToArray() };
         var rawEyes = eyePoints.Select(points => EyeRect(points, gray.Size())).ToArray();
+        var valid = new bool[2];
         for (var i = 0; i < 2; i++)
         {
             _smoothEyes[i] = _hasSmoothEyes ? SmoothRect(_smoothEyes[i], rawEyes[i], .22) : rawEyes[i];
@@ -87,13 +90,26 @@ public sealed class CameraPipeline : IDisposable
             _smoothX[i] = _smoothX[i] * .78 + nx * .22;
             _smoothY[i] = _smoothY[i] * .82 + ny * .18;
             if (_calibrating) _samples[i].Add((_smoothX[i], _smoothY[i]));
-            if (correct)
-            {
-                var magnitude = _neural.Correct(output, _smoothEyes[i], eyePoints[i], i == 0,
-                    _smoothX[i], _smoothY[i], _targetX[i], _targetY[i], strength);
-                LastCorrectionMagnitude = Math.Max(LastCorrectionMagnitude, magnitude);
-            }
+            valid[i] = true;
             LastEyesFound++;
+        }
+        // Human eyes move as a pair. Use one shared vector so detector noise can never
+        // make the generated pupils diverge or rotate in opposite directions.
+        if (correct && valid[0] && valid[1])
+        {
+            var wantedDx = ((_targetX[0]-_smoothX[0])+(_targetX[1]-_smoothX[1]))*.5;
+            var wantedDy = ((_targetY[0]-_smoothY[0])+(_targetY[1]-_smoothY[1]))*.5;
+            if (Math.Abs(wantedDx)<.018) wantedDx=0;
+            if (Math.Abs(wantedDy)<.025) wantedDy=0;
+            wantedDx=Math.Clamp(wantedDx,-.12,.12); wantedDy=Math.Clamp(wantedDy,-.10,.10);
+            _binocularDx=_binocularDx*.88+wantedDx*.12;
+            _binocularDy=_binocularDy*.90+wantedDy*.10;
+            for(var i=0;i<2;i++)
+            {
+                var magnitude=_neural.Correct(output,_smoothEyes[i],eyePoints[i],i==0,
+                    _smoothX[i],_smoothY[i],_smoothX[i]+_binocularDx,_smoothY[i]+_binocularDy,strength);
+                LastCorrectionMagnitude=Math.Max(LastCorrectionMagnitude,magnitude);
+            }
         }
         _hasSmoothEyes = LastEyesFound == 2;
         return output;
@@ -178,6 +194,6 @@ public sealed class CameraPipeline : IDisposable
         }
         catch { /* damaged/old profile falls back to safe central targets */ }
     }
-    public void Close() { _capture?.Release(); _capture?.Dispose(); _capture=null; _hasSmoothEyes=false; }
+    public void Close() { _capture?.Release(); _capture?.Dispose(); _capture=null; _hasSmoothEyes=false; _binocularDx=0; _binocularDy=0; }
     public void Dispose() { Close(); _face.Dispose(); _landmarker.Dispose(); _neural.Dispose(); }
 }
