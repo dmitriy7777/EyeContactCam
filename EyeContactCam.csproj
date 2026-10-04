@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.23.2" />
     <PackageReference Include="OpenCvSharp4" Version="4.10.0.20240616" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.10.0.20240616" />
     <PackageReference Include="OpenCvSharp4.WpfExtensions" Version="4.10.0.20240616" />
@@ -16,6 +17,8 @@
 
   <ItemGroup>
     <None Include="Assets\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Assets\*.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Assets\Neural\*.onnx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

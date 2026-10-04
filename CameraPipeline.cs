@@ -1,4 +1,5 @@
 using OpenCvSharp;
+using OpenCvSharp.Face;
 using System.IO;
 using System.Text.Json;
 
@@ -8,7 +9,8 @@ public sealed class CameraPipeline : IDisposable
 {
     private VideoCapture? _capture;
     private readonly CascadeClassifier _face;
-    private readonly CascadeClassifier _eyes;
+    private readonly FacemarkLBF _landmarker;
+    private readonly NeuralGazeCorrector _neural;
     private readonly List<(double X, double Y)>[] _samples = [[], []];
     private readonly double[] _targetX = [.50, .50];
     private readonly double[] _targetY = [.52, .52];
@@ -30,7 +32,10 @@ public sealed class CameraPipeline : IDisposable
     {
         var assets = Path.Combine(AppContext.BaseDirectory, "Assets");
         _face = new CascadeClassifier(Path.Combine(assets, "haarcascade_frontalface_default.xml"));
-        _eyes = new CascadeClassifier(Path.Combine(assets, "haarcascade_eye_tree_eyeglasses.xml"));
+        var parameters = new FacemarkLBF.Params();
+        _landmarker = FacemarkLBF.Create(parameters);
+        _landmarker.LoadModel(Path.Combine(assets, "lbfmodel.yaml"));
+        _neural = new NeuralGazeCorrector();
         LoadCalibration();
     }
 
@@ -63,17 +68,12 @@ public sealed class CameraPipeline : IDisposable
         if (faces.Length == 0) return output;
 
         var face = faces.OrderByDescending(r => r.Width * r.Height).First();
-        var upper = ClampRect(new Rect(face.X, face.Y + (int)(face.Height * .16), face.Width, (int)(face.Height * .43)), gray.Size());
-        using var eyeBand = new Mat(gray, upper);
-        var candidates = _eyes.DetectMultiScale(eyeBand, 1.08, 5, HaarDetectionTypes.ScaleImage, new Size(25, 18))
-            .Select(r => new Rect(r.X + upper.X, r.Y + upper.Y, r.Width, r.Height)).ToArray();
-
-        var mid = face.X + face.Width / 2;
-        var left = candidates.Where(r => r.X + r.Width / 2 < mid).OrderByDescending(r => r.Width * r.Height).FirstOrDefault();
-        var right = candidates.Where(r => r.X + r.Width / 2 >= mid).OrderByDescending(r => r.Width * r.Height).FirstOrDefault();
-        if (left.Width == 0 || right.Width == 0) return output;
-
-        var rawEyes = new[] { left, right };
+        Point2f[][] shapes;
+        using (var faceArray = InputArray.Create(new[] { face }))
+            if (!_landmarker.Fit(gray, faceArray, out shapes) || shapes.Length == 0 || shapes[0].Length != 68) return output;
+        var all = shapes[0];
+        var eyePoints = new[] { all.Skip(36).Take(6).ToArray(), all.Skip(42).Take(6).ToArray() };
+        var rawEyes = eyePoints.Select(points => EyeRect(points, gray.Size())).ToArray();
         for (var i = 0; i < 2; i++)
         {
             _smoothEyes[i] = _hasSmoothEyes ? SmoothRect(_smoothEyes[i], rawEyes[i], .22) : rawEyes[i];
@@ -89,7 +89,8 @@ public sealed class CameraPipeline : IDisposable
             if (_calibrating) _samples[i].Add((_smoothX[i], _smoothY[i]));
             if (correct)
             {
-                var magnitude = WarpIris(output, _smoothEyes[i], _smoothX[i], _smoothY[i], _targetX[i], _targetY[i], strength);
+                var magnitude = _neural.Correct(output, _smoothEyes[i], eyePoints[i], i == 0,
+                    _smoothX[i], _smoothY[i], _targetX[i], _targetY[i], strength);
                 LastCorrectionMagnitude = Math.Max(LastCorrectionMagnitude, magnitude);
             }
             LastEyesFound++;
@@ -148,6 +149,11 @@ public sealed class CameraPipeline : IDisposable
     private static Rect SmoothRect(Rect old, Rect current, double a) => new(
         (int)(old.X * (1-a) + current.X * a), (int)(old.Y * (1-a) + current.Y * a),
         Math.Max(1, (int)(old.Width * (1-a) + current.Width * a)), Math.Max(1, (int)(old.Height * (1-a) + current.Height * a)));
+    private static Rect EyeRect(Point2f[] points, Size size)
+    {
+        var minX=points.Min(p=>p.X);var maxX=points.Max(p=>p.X);var minY=points.Min(p=>p.Y);var maxY=points.Max(p=>p.Y);
+        var w=Math.Max(8,maxX-minX);var h=Math.Max(5,maxY-minY);return ClampRect(new Rect((int)(minX-w*.08),(int)(minY-h*.35),(int)(w*1.16),(int)(h*1.70)),size);
+    }
     private static Rect ClampRect(Rect r, Size s)
     {
         var x = Math.Clamp(r.X, 0, s.Width - 1); var y = Math.Clamp(r.Y, 0, s.Height - 1);
@@ -173,5 +179,5 @@ public sealed class CameraPipeline : IDisposable
         catch { /* damaged/old profile falls back to safe central targets */ }
     }
     public void Close() { _capture?.Release(); _capture?.Dispose(); _capture=null; _hasSmoothEyes=false; }
-    public void Dispose() { Close(); _face.Dispose(); _eyes.Dispose(); }
+    public void Dispose() { Close(); _face.Dispose(); _landmarker.Dispose(); _neural.Dispose(); }
 }
